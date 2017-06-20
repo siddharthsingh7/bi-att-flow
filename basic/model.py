@@ -160,23 +160,139 @@ class Model(object):
             else:
                 p0 = attention_layer(config, self.is_train, h, u, h_mask=self.x_mask, u_mask=self.q_mask, scope="p0", tensor_dict=self.tensor_dict)
                 first_cell = d_cell
+            '''
+            RUMINATING LAYER
+            '''
+            with tf.variable_scope('rum_layer'):
+                print('-'*5 + "RUMINATING LAYER"+'-'*5)
+                print("input")
+                print("Context",xx) #[N,M,JX,2d]
+                print("Question",qq) #[N,JQ,2d]
 
-            (fw_g0, bw_g0), _ = bidirectional_dynamic_rnn(first_cell, first_cell, p0, x_len, dtype='float', scope='g0')  # [N, M, JX, 2d]
-            g0 = tf.concat(3, [fw_g0, bw_g0])
-            (fw_g1, bw_g1), _ = bidirectional_dynamic_rnn(first_cell, first_cell, g0, x_len, dtype='float', scope='g1')  # [N, M, JX, 2d]
-            g1 = tf.concat(3, [fw_g1, bw_g1])
+                print("p0",p0) #[N,M,JX,8D]
+                sum_cell = BasicLSTMCell(d,state_is_tuple=True)
 
-            logits = get_logits([g1, p0], d, True, wd=config.wd, input_keep_prob=config.input_keep_prob,
-                                mask=self.x_mask, is_train=self.is_train, func=config.answer_func, scope='logits1')
-            a1i = softsel(tf.reshape(g1, [N, M * JX, 2 * d]), tf.reshape(logits, [N, M * JX]))
+
+
+                (s_f, s_b), _ = bidirectional_dynamic_rnn(sum_cell, sum_cell, p0, x_len, dtype='float', scope="sum_layer")
+
+                print("s_f",s_f)
+
+                s_fout = s_f[:,:,-1,:]
+                s_bout = s_b[:,:,-1,:]
+                print("s_fout",s_fout)
+                s = tf.concat(2, [s_fout, s_bout]) # [N,M,2d]
+                print("summarization layer",s)
+
+                print("query ruminate layer") #TODO BiLSTM
+                S_Q = tf.tile(tf.expand_dims(s,2),[1,1,JQ,1]) # [N,M,JX,JQ,2d]
+                print("s tiled Q times",S_Q)
+
+                xavier_init = tf.contrib.layers.xavier_initializer()
+                zero_init = tf.constant_initializer(0)
+
+                W1_Qz = tf.get_variable('W1_Qz',shape=(2*d,2*d),dtype=tf.float32,initializer=tf.contrib.layers.xavier_initializer())
+                W2_Qz = tf.get_variable('W2_Qz',shape=(2*d,2*d),dtype=tf.float32,initializer=xavier_init)
+                b_Qz = tf.get_variable('b_Qz',shape=(2*d,),dtype=tf.float32,initializer=zero_init)
+                W1_Qf = tf.get_variable('W1_Qf',shape=(2*d,2*d),dtype=tf.float32,initializer=tf.contrib.layers.xavier_initializer())
+                W2_Qf = tf.get_variable('W2_Qf',shape=(2*d,2*d),dtype=tf.float32,initializer=xavier_init)
+                b_Qf = tf.get_variable('b_Qf',shape=(2*d,),dtype=tf.float32,initializer=zero_init)
+
+                z_part1 = tf.reshape(tf.matmul(tf.reshape(S_Q,[-1,2*d]),W1_Qz) ,[N,M,JQ,2*d])
+                print("z_part1",z_part1)
+                z_part2 = tf.expand_dims(tf.matmul(tf.reshape(qq,[-1,2*d]), W2_Qz) + b_Qz, 1)
+                print("z_part2",z_part2)
+                z = tf.tanh(z_part1 + z_part2 )
+                print("z",z)
+                f_part1 = tf.reshape(tf.matmul(tf.reshape(S_Q,[-1,2*d]),W1_Qf) ,[N,M,JQ,2*d])
+                print("f_part1",f_part1)
+                f_part2 = tf.expand_dims(tf.matmul(tf.reshape(qq,[-1,2*d]), W2_Qf) + b_Qf, 1)
+                print("f_part2",f_part2)
+                f = tf.sigmoid(f_part1 + f_part2)
+                print("f",f)
+
+                #Q_hat = tf.mul(f, tf.reshape(qq,[-1,2*d])) + tf.mul( (1 - f),z)
+                Q_hat = tf.mul(f, tf.reshape(tf.expand_dims(qq,1),[1,M,1,1])) + tf.mul( (1 - f),z)
+                print("Q_hat",Q_hat) #[N,M,JQ,2d] -> [N,M,JQ,2d]
+
+                print("context ruminate layer")
+
+                S_C = tf.tile(tf.expand_dims(s,2),[1,1,JX,1]) # [N,M,JX,2d]
+                print("s tiled C times",S_C)
+
+                S_cell = BasicLSTMCell(d,state_is_tuple=True)
+                (fw_h, bw_h), _ = bidirectional_dynamic_rnn(S_cell, S_cell, S_C, x_len, dtype='float', scope="S_C")
+                S_C = tf.concat(3, [fw_h, bw_h])
+                print("biLSTM output",S_C) #[N,M,JX,2d]
+
+                W1_Cz = tf.get_variable('W1_Cz',shape=(2*d,2*d),dtype=tf.float32,initializer=xavier_init)
+                W2_Cz = tf.get_variable('W2_Cz',shape=(2*d,2*d),dtype=tf.float32,initializer=xavier_init)
+                b_Cz = tf.get_variable('b_Cz',shape=(2*d,),dtype=tf.float32,initializer=zero_init)
+                W1_Cf = tf.get_variable('W1_Cf',shape=(2*d,2*d),dtype=tf.float32,initializer=xavier_init)
+                W2_Cf = tf.get_variable('W2_Cf',shape=(2*d,2*d),dtype=tf.float32,initializer=xavier_init)
+                b_Cf = tf.get_variable('b_Cf',shape=(2*d,),dtype=tf.float32,initializer=zero_init)
+
+                zc_part1 = tf.reshape(tf.matmul(tf.reshape(S_C,[-1,2*d]),W1_Cz) ,[N,M,JX,2*d])
+                print("zc_part1",zc_part1)
+                zc_part2 = tf.expand_dims(tf.matmul(tf.reshape(xx,[-1,2*d]), W2_Cz) + b_Cz, 1)
+                print("zc_part2",zc_part2)
+                zc = tf.tanh(zc_part1 + zc_part2)
+                print("zc",zc)
+                fc_part1 = tf.reshape(tf.matmul(tf.reshape(S_C,[-1,2*d]),W1_Cf) ,[N,M,JX,2*d])
+                print("fc_part1",fc_part1)
+                fc_part2 = tf.expand_dims(tf.matmul(tf.reshape(xx,[-1,2*d]), W2_Cf) + b_Cf, 1)
+                print("fc_part2",fc_part2)
+                fc = tf.sigmoid(fc_part1 + fc_part2)
+                print("fc",fc)
+                C_hat = tf.mul(fc,tf.reshape(tf.expand_dims(xx,1),[1,1,JX,1]))  + tf.mul( (1 - fc),zc)
+                print("C_hat",C_hat) #[N,M,JX,2d]
+
+                #Second Hop bi-Attention
+
+                print('-'*5 + "SECOND HOP ATTENTION"+'-'*5)
+                print("C_hat",C_hat) #[N,M,JX,2d]
+                print("Q_hat",Q_hat) #[N,M,JQ,2d]
+
+                sh_aug = tf.tile(tf.expand_dims(C_hat,3),[1,1,1,JQ,1])
+                su_aug = tf.tile(tf.expand_dims(Q_hat,2),[1,1,JX,1,1])
+                print("sh_aug",sh_aug) #[N,M,JX,2d]
+                print("su_aug",su_aug) #[N,M,JQ,2d]
+
+
+                sh_mask_aug = tf.tile(tf.expand_dims(self.x_mask, -1), [1,1,1,JQ])
+                su_mask_aug = tf.tile( tf.expand_dims(tf.expand_dims(self.q_mask,1),1),[1,M,JX,1])
+                shu_mask = sh_mask_aug & su_mask_aug
+                print(sh_mask_aug,su_mask_aug)
+                su_logits = get_logits([sh_aug, su_aug], None, True, wd=config.wd, mask=shu_mask,
+                              is_train=True, func=config.logit_func, scope='su_logits')
+                print("su_logits",su_logits)
+
+                su_a = softsel(su_aug, su_logits)
+                sh_a = softsel(C_hat, tf.reduce_max(su_logits, 3))
+                sh_a = tf.tile(tf.expand_dims(sh_a, 2), [1, 1, JX, 1])
+                print("sh_a",sh_a)
+                p00 = tf.concat(3, [C_hat, su_a, C_hat * su_a, C_hat * sh_a])
+                print("p00",p00)
+
+            print('-'*5 + "ANSWER LAYER"+'-'*5)
+            (fw_g00, bw_g00), _ = bidirectional_dynamic_rnn(first_cell, first_cell, p00, x_len, dtype='float', scope='g00')  # [N, M, JX, 2d]
+            g00 = tf.concat(3, [fw_g00, bw_g00])
+            print("g00",g00)
+            (fw_g11, bw_g11), _ = bidirectional_dynamic_rnn(first_cell, first_cell, g00, x_len, dtype='float', scope='g11')  # [N, M, JX, 2d]
+            g11 = tf.concat(3, [fw_g11, bw_g11])
+            print("g11",g11)
+            logits = get_logits([g11, p00], d, True, wd=config.wd, input_keep_prob=config.input_keep_prob,
+                                mask=self.x_mask, is_train=self.is_train, func=config.answer_func, scope='s_logits1')
+            a1i = softsel(tf.reshape(g11, [N, M * JX, 2 * d]), tf.reshape(logits, [N, M * JX]))
             a1i = tf.tile(tf.expand_dims(tf.expand_dims(a1i, 1), 1), [1, M, JX, 1])
 
-            (fw_g2, bw_g2), _ = bidirectional_dynamic_rnn(d_cell, d_cell, tf.concat(3, [p0, g1, a1i, g1 * a1i]),
-                                                          x_len, dtype='float', scope='g2')  # [N, M, JX, 2d]
-            g2 = tf.concat(3, [fw_g2, bw_g2])
-            logits2 = get_logits([g2, p0], d, True, wd=config.wd, input_keep_prob=config.input_keep_prob,
+            (fw_g22, bw_g22), _ = bidirectional_dynamic_rnn(d_cell, d_cell, tf.concat(3, [p00, g11, a1i, g11 * a1i]),
+                                                          x_len, dtype='float', scope='g22')  # [N, M, JX, 2d]
+            g22 = tf.concat(3, [fw_g22, bw_g22])
+            print("g22",g22)
+            logits2 = get_logits([g22, p00], d, True, wd=config.wd, input_keep_prob=config.input_keep_prob,
                                  mask=self.x_mask,
-                                 is_train=self.is_train, func=config.answer_func, scope='logits2')
+                                 is_train=self.is_train, func=config.answer_func, scope='s_logits2')
 
             flat_logits = tf.reshape(logits, [-1, M * JX])
             flat_yp = tf.nn.softmax(flat_logits)  # [-1, M*JX]
@@ -185,8 +301,11 @@ class Model(object):
             flat_yp2 = tf.nn.softmax(flat_logits2)
             yp2 = tf.reshape(flat_yp2, [-1, M, JX])
 
-            self.tensor_dict['g1'] = g1
-            self.tensor_dict['g2'] = g2
+            print("yp",yp)
+            print("yp2",yp2)
+
+            self.tensor_dict['g1'] = g11
+            self.tensor_dict['g2'] = g22
 
             self.logits = flat_logits
             self.logits2 = flat_logits2
@@ -194,10 +313,13 @@ class Model(object):
             self.yp2 = yp2
 
     def _build_loss(self):
+
+        from ptpython.repl import embed
         config = self.config
         JX = tf.shape(self.x)[2]
         M = tf.shape(self.x)[1]
         JQ = tf.shape(self.q)[1]
+
         loss_mask = tf.reduce_max(tf.cast(self.q_mask, 'float'), 1)
         losses = tf.nn.softmax_cross_entropy_with_logits(
             self.logits, tf.cast(tf.reshape(self.y, [-1, M * JX]), 'float'))
@@ -207,6 +329,37 @@ class Model(object):
             self.logits2, tf.cast(tf.reshape(self.y2, [-1, M * JX]), 'float')))
         tf.add_to_collection("losses", ce_loss2)
 
+        '''
+        print("calculating question answer loss")
+        print("y",self.y) #[N,M,JX]
+        Q = self.tensor_dict['qq']
+        X = self.tensor_dict['xx']
+
+        s = tf.argmax(tf.cast(tf.reshape(self.y,[-1,M*JX]),tf.float16),0) #[N,]
+        e = tf.argmax(tf.cast(tf.reshape(self.y2,[-1,M*JX]),tf.float16),0)#[N,]
+
+        print(s,e)
+
+        print("Q",Q)  #[N,JQ,2d]
+        qbow = tf.reduce_sum(Q,1,keep_dims=True) #[N,2d] TODO - normalize
+        print("qbow",qbow)
+
+        XX = tf.reshape(X,[-1,M*JX,200])
+        print("reshaped",XX)
+
+        C_s = tf.slice(XX,[0,1,0],[-1,1,-1]) # [N,1,2d] TODO - slice based on c and e
+        C_e = tf.slice(XX,[0,1,0],[-1,1,-1])
+
+        #Cosine similarity
+        normalize_q = tf.nn.l2_normalize(qbow,0)
+        normalize_c_s = tf.nn.l2_normalize(C_s,0)
+        normalize_c_e = tf.nn.l2_normalize(C_e,0)
+        cos_similarity_a =tf.reduce_sum(tf.mul(normalize_q,normalize_c_s))
+        cos_similarity_b =tf.reduce_sum(tf.mul(normalize_q,normalize_c_e))
+
+        ce_loss3 = cos_similarity_a + cos_similarity_b
+        tf.add_to_collection("losses",ce_loss3)
+        '''
         self.loss = tf.add_n(tf.get_collection('losses', scope=self.scope), name='loss')
         tf.scalar_summary(self.loss.op.name, self.loss)
         tf.add_to_collection('ema/scalar', self.loss)
